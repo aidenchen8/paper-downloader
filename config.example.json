@@ -1,0 +1,21 @@
+{
+  "crossref": {
+    "mailto": "your.email@example.com"
+  },
+  "browser": {
+    "channel": "chrome",
+    "userDataDir": "",
+    "profileDirectory": "Default",
+    "executablePath": "",
+    "disableExtensions": false,
+    "headless": false,
+    "slowMoMs": 0
+  },
+  "institution": {
+    "authHosts": [],
+    "authUrlFragments": [],
+    "authPageTitles": [],
+    "authLoadingTitles": [],
+    "ignoredAccessDois": []
+  }
+}
