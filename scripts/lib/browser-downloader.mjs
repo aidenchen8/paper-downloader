@@ -166,6 +166,12 @@ function isPdfContentType(contentType = "") {
   return String(contentType).toLowerCase().includes("pdf");
 }
 
+function isRealPdfBody(body) {
+  if (!body || body.length < 5) return false;
+  const header = body.slice(0, 5).toString("ascii");
+  return header === "%PDF-";
+}
+
 async function closePageQuietly(page) {
   try {
     if (page && !page.isClosed()) {
@@ -330,7 +336,7 @@ function attachArtifactCollector(page) {
         return;
       }
       const body = await response.body();
-      if (body && body.length > 4_000) {
+      if (body && body.length > 4_000 && isRealPdfBody(body)) {
         firstPdfBody = body;
         firstPdfUrl = response.url();
       }
@@ -356,6 +362,17 @@ function attachArtifactCollector(page) {
       if (firstDownload) {
         consumed = true;
         await firstDownload.saveAs(destPath);
+        const checkBuf = Buffer.alloc(5);
+        const fd = await fs.open(destPath, "r");
+        try {
+          await fd.read(checkBuf, 0, 5, 0);
+        } finally {
+          await fd.close();
+        }
+        if (!isRealPdfBody(checkBuf)) {
+          await fs.unlink(destPath).catch(() => {});
+          return null;
+        }
         const stats = await fs.stat(destPath);
         return {
           state: "downloaded",
@@ -1227,7 +1244,13 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
   const runtime = resolveBrowserRuntime(config.browser);
   const launchOptions = {
     acceptDownloads: true,
-    args: runtime.launchArgs,
+    args: [
+      ...runtime.launchArgs,
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--no-first-run",
+      "--no-default-browser-check"
+    ],
     channel: runtime.channel,
     downloadsPath: downloadTempDir,
     headless: runtime.headless,
@@ -1246,6 +1269,19 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
       `Failed to launch ${runtime.channel} with user data dir ${runtime.userDataDir}. Close all browser windows first. ${error.message}`
     );
   }
+
+  // 反检测：移除自动化浏览器指纹
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+    window.chrome = { runtime: {} };
+    const originalQuery = window.navigator.permissions?.query;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) =>
+        parameters.name === "notifications"
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters);
+    }
+  });
 
   try {
     const total = validatedData.references.length;

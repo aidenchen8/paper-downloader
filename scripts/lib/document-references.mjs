@@ -26,18 +26,31 @@ const REFERENCE_HEADINGS = [
   "works cited",
   "literature cited",
   "reference",
+  "reference list",
+  "references cited",
   "参考文献",
-  "文献"
+  "文献",
+  "文献列表",
+  "推荐文献",
+  "文献推荐",
+  "推荐清单"
 ];
 
-const URL_REGEX = /https?:\/\/[^\s<>"')\]]+/gi;
+const URL_REGEX = /https?:\/\/[^\s<>"'\]]+(?:\([^\s<>"'\]]*\)[^\s<>"'\]]*)*/gi;
 
 function looksLikeUrl(value = "") {
   return /^https?:\/\//i.test(String(value).trim());
 }
 
 function cleanupTrailingPunctuation(value = "") {
-  return String(value).replace(/[)\].,;:]+$/g, "");
+  const str = String(value);
+  // 保留括号平衡的 URL（如 Cell Press S2405-8440(24)17017-X）
+  const openParens = (str.match(/\(/g) || []).length;
+  const closeParens = (str.match(/\)/g) || []).length;
+  if (openParens > 0 && openParens === closeParens) {
+    return str;
+  }
+  return str.replace(/[)\].,;:]+$/g, "");
 }
 
 function normalizeWhitespace(text = "") {
@@ -199,7 +212,13 @@ function findReferencesSection(text = "") {
 
   for (const [index, rawLine] of lines.entries()) {
     const line = rawLine.trim().toLowerCase();
+    // 1. 精确匹配
     if (REFERENCE_HEADINGS.includes(line)) {
+      lastHeadingIndex = index;
+      continue;
+    }
+    // 2. 模糊匹配：标题行包含关键词且较短
+    if (line.length < 50 && REFERENCE_HEADINGS.some((h) => line.includes(h))) {
       lastHeadingIndex = index;
     }
   }
@@ -210,6 +229,11 @@ function findReferencesSection(text = "") {
 
   const paragraphs = normalized.split(/\n\s*\n/).filter(Boolean);
   if (paragraphs.length >= 3) {
+    // 检查是否整个文档就是编号引用列表
+    const numberedCount = paragraphs.filter((p) => /^\d+[.)、]\s+/.test(p.trim())).length;
+    if (numberedCount >= paragraphs.length * 0.5) {
+      return normalized;
+    }
     return paragraphs.slice(Math.max(0, Math.floor(paragraphs.length * 0.6))).join("\n\n");
   }
 

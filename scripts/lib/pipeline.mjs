@@ -147,7 +147,9 @@ export async function validateRefsStage({ projectArg, config }) {
   for (const [index, reference] of raw.references.entries()) {
     const previousItem = previousById.get(reference.id);
     const sameSourceText = previousItem?.source_text === (reference.unstructured || "");
-    const sameSourceDoi = String(previousItem?.doi || "") === String(reference.doi || previousItem?.doi || "");
+    const sameSourceDoi = previousItem?.doi
+      ? String(previousItem.doi) === String(reference.doi || "")
+      : false;
 
     if (previousItem && previousItem.status === "verified" && sameSourceText && sameSourceDoi) {
       validatedReferences.push(finalizeReferenceRecord(reference, previousItem));
