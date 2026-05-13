@@ -210,20 +210,28 @@ export function detectReferenceType(value = "") {
 }
 
 export function detectReferenceLanguage(reference = {}) {
-  const probe = [
+  // 核心字段：标题、期刊、作者名（通常是纯英文或纯中文）
+  const coreFields = [
     reference.language,
     reference.title,
     reference.journal,
     reference.author,
-    reference.authors,
-    reference.unstructured,
-    reference.source_text
+    reference.authors
   ].filter(Boolean).join(" ");
 
-  if (containsCjk(probe)) {
+  if (containsCjk(coreFields)) {
     return "zh";
   }
-  if (/[A-Za-z]/.test(probe)) {
+  if (/[A-Za-z]/.test(coreFields)) {
+    return "en";
+  }
+
+  // 兜底：用 unstructured/source_text 判断
+  const fallback = [reference.unstructured, reference.source_text].filter(Boolean).join(" ");
+  if (containsCjk(fallback)) {
+    return "zh";
+  }
+  if (/[A-Za-z]/.test(fallback)) {
     return "en";
   }
   return "unknown";
@@ -337,7 +345,10 @@ export function finalizeReferenceRecord(rawReference = {}, validatedReference = 
   const sourcePlatform = inferSourcePlatform(validatedReference) || inferSourcePlatform(rawReference) || "";
   const articleUrl = validatedReference.article_url || firstPlatformLink(validatedReference) || firstPlatformLink(rawReference) || "";
   const platformHint = rawReference.platform_hint || sourcePlatform;
-  const routeFamily = sourcePlatform || language === "zh" ? "chinese_platform" : "english_doi";
+  const hasPublisherUrl = articleUrl && !inferSourcePlatform({ article_url: articleUrl });
+  const hasVerifiedDoi = Boolean(validatedReference.doi);
+  const isEnglishRef = hasVerifiedDoi || hasPublisherUrl;
+  const routeFamily = sourcePlatform || (language === "zh" && !isEnglishRef) ? "chinese_platform" : "english_doi";
   const preferredPlatforms = routeFamily === "chinese_platform"
     ? Array.from(new Set([sourcePlatform, platformHint, ...CHINESE_PLATFORM_ORDER].filter(Boolean)))
     : [];
