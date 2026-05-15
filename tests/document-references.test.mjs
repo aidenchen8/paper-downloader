@@ -42,3 +42,41 @@ test("extractReferencesFromDocumentText parses Chinese references conservatively
   assert.equal(references[1].platform_hint, "cqvip");
   assert.equal(references[1].article_url, "https://www.cqvip.com/qk/97011x/202204/7101234567.html");
 });
+
+test("extractReferencesFromDocumentText parses recommendation-list documents with titles and links", () => {
+  const text = `
+  数字文化资产与人工智能结合——文献推荐清单
+
+  一、数据集与 Benchmark 类文章
+
+  1. Datasheets for Digital Cultural Heritage Datasets (2023)
+
+  作者: H Alkemade, S Claeyssens, G Colavizza et al.
+
+  期刊/会议: Journal of Open Humanities Data (JOHD) | 被引: 53次
+
+  提出了数字文化遗产数据集的“数据表”标准化框架。
+
+  https://cris.unibo.it/handle/11585/947893
+
+  2. Artificial Intelligence for Dunhuang Cultural Heritage Protection: The Project and the Dataset (2022)
+
+  作者: T Yu, C Lin, S Zhang, C Wang, X Ding, H An et al.
+
+  期刊/会议: International Journal of Computer Vision (IJCV) — Springer | 被引: 102次
+
+  顶级计算机视觉期刊，发布了敦煌文化遗产保护的大规模数据集。
+
+  https://link.springer.com/article/10.1007/s11263-022-01665-x
+  `;
+
+  const references = extractReferencesFromDocumentText(text);
+  assert.equal(references.length, 2);
+  assert.equal(references[0].title, "Datasheets for Digital Cultural Heritage Datasets");
+  assert.equal(references[0].author, "H Alkemade, S Claeyssens, G Colavizza et al.");
+  assert.equal(references[0].journal, "Journal of Open Humanities Data (JOHD)");
+  assert.equal(references[0].article_url, "https://cris.unibo.it/handle/11585/947893");
+  assert.equal(references[1].doi, "10.1007/s11263-022-01665-x");
+  assert.equal(references[1].year, 2022);
+  assert.equal(references[1].extraction_method, "document_recommendation");
+});

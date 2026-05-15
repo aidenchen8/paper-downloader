@@ -294,6 +294,152 @@ function splitLineAccumulationReferences(sectionText = "") {
   return references.filter((entry) => entry.length >= 20);
 }
 
+function looksLikeRecommendationTitle(value = "") {
+  return /^\d+\.\s+.+\((19|20)\d{2}\)\s*$/.test(String(value).trim());
+}
+
+function looksLikeSectionHeading(value = "") {
+  const line = String(value).trim();
+  if (!line) {
+    return false;
+  }
+  return (
+    /^[一二三四五六七八九十]+[、，.．]\s*/.test(line) ||
+    /^section\s+\d+/i.test(line) ||
+    /^(references|bibliography|works cited|参考文献)$/i.test(line)
+  );
+}
+
+function normalizeRecommendationTitle(line = "") {
+  const raw = trimReferenceMarker(String(line).trim());
+  const match = raw.match(/^(?<title>.+?)\s+\((?<year>(19|20)\d{2})\)\s*$/);
+  if (!match) {
+    return {
+      title: raw,
+      year: 0
+    };
+  }
+
+  return {
+    title: match.groups?.title?.trim() || raw,
+    year: Number.parseInt(match.groups?.year || "0", 10) || 0
+  };
+}
+
+function buildRecommendationReference(entry, index) {
+  const links = extractLinks(entry.link || entry.rawText || "");
+  const normalizedLinks = Array.from(new Set([
+    ...links,
+    ...(entry.link ? [cleanupTrailingPunctuation(entry.link)] : [])
+  ].filter(Boolean)));
+  const titleInfo = normalizeRecommendationTitle(entry.titleLine);
+  const articleUrl = normalizedLinks[0] || "";
+  const doiFromText = extractDoiFromText(`${entry.titleLine}\n${entry.rawText || ""}`);
+  const doiFromLink = normalizedLinks
+    .map((link) => normalizeDoi(link))
+    .find((link) => /^10\.\d{4,9}\//.test(link)) || "";
+
+  return {
+    id: index + 1,
+    doi: doiFromText || doiFromLink || null,
+    raw_doi: doiFromText || doiFromLink || "",
+    author: entry.authorLine.replace(/^作者[:：]\s*/i, "").trim(),
+    title: titleInfo.title,
+    journal: entry.journalLine.replace(/^期刊\/会议[:：]\s*/i, "").replace(/\s*\|\s*被引[:：]?.*$/u, "").trim(),
+    year: titleInfo.year,
+    language: detectReferenceLanguage({
+      author: entry.authorLine,
+      title: titleInfo.title,
+      journal: entry.journalLine,
+      unstructured: entry.rawText || titleInfo.title
+    }),
+    reference_type: "",
+    platform_hint: detectPlatformFromLink(articleUrl) || "",
+    article_url: articleUrl,
+    link: articleUrl,
+    links: normalizedLinks,
+    unstructured: normalizeWhitespace([
+      titleInfo.title,
+      entry.authorLine,
+      entry.journalLine,
+      articleUrl
+    ].filter(Boolean).join("\n")),
+    extraction_method: "document_recommendation"
+  };
+}
+
+function extractRecommendationListEntries(text = "") {
+  const paragraphs = String(text)
+    .split(/\n\s*\n/)
+    .map((entry) => normalizeWhitespace(entry))
+    .filter(Boolean);
+
+  const items = [];
+  let current = null;
+
+  const finalizeCurrent = () => {
+    if (!current?.titleLine) {
+      current = null;
+      return;
+    }
+    if (!current.authorLine && !current.journalLine && !current.link) {
+      current = null;
+      return;
+    }
+    items.push(current);
+    current = null;
+  };
+
+  for (const paragraph of paragraphs) {
+    if (looksLikeRecommendationTitle(paragraph)) {
+      finalizeCurrent();
+      current = {
+        titleLine: paragraph,
+        authorLine: "",
+        journalLine: "",
+        link: "",
+        rawText: paragraph
+      };
+      continue;
+    }
+
+    if (!current) {
+      continue;
+    }
+
+    if (looksLikeSectionHeading(paragraph)) {
+      finalizeCurrent();
+      continue;
+    }
+
+    if (/^作者[:：]/i.test(paragraph)) {
+      current.authorLine = paragraph;
+      current.rawText = `${current.rawText}\n${paragraph}`;
+      continue;
+    }
+
+    if (/^期刊\/会议[:：]/i.test(paragraph)) {
+      current.journalLine = paragraph;
+      current.rawText = `${current.rawText}\n${paragraph}`;
+      continue;
+    }
+
+    const paragraphLinks = extractLinks(paragraph);
+    if (paragraphLinks.length > 0) {
+      current.link = paragraphLinks[0];
+      current.rawText = `${current.rawText}\n${paragraph}`;
+      continue;
+    }
+
+    current.rawText = `${current.rawText}\n${paragraph}`;
+  }
+
+  finalizeCurrent();
+  return items
+    .map((entry, index) => buildRecommendationReference(entry, index))
+    .filter((entry) => entry.title && (entry.article_url || entry.author || entry.journal));
+}
+
 function buildReferenceObjects(entries) {
   return entries.map((entry, index) => {
     const links = extractLinks(entry);
@@ -417,6 +563,11 @@ export async function extractDocumentContent(filePath) {
 }
 
 export function extractReferencesFromDocumentText(text) {
+  const recommendations = extractRecommendationListEntries(text);
+  if (recommendations.length >= 2) {
+    return recommendations;
+  }
+
   const section = findReferencesSection(text);
   const numbered = splitNumberedReferences(section);
   if (numbered.length >= 2) {

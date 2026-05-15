@@ -317,6 +317,111 @@ function buildPdfHints(url) {
   );
 }
 
+function derivePdfUrlsFromArticleUrl(articleUrl = "", ref = {}, publisher = "unknown") {
+  const url = String(articleUrl || "").trim();
+  if (!url.startsWith("http")) {
+    return [];
+  }
+
+  const normalized = url.replace(/[?#].*$/, "").replace(/\/$/, "");
+  const candidates = [];
+
+  if (/mdpi\.com\//i.test(normalized)) {
+    candidates.push(`${normalized}/pdf`);
+  }
+  if (/nature\.com\/articles\//i.test(normalized)) {
+    candidates.push(`${normalized}.pdf`);
+  }
+  if (/link\.springer\.com\/article\//i.test(normalized)) {
+    candidates.push(normalized.replace("/article/", "/content/pdf/") + ".pdf");
+  }
+  if (/aclanthology\.org\//i.test(normalized)) {
+    candidates.push(`${normalized}.pdf`);
+  }
+  if (/arxiv\.org\/abs\//i.test(normalized)) {
+    candidates.push(normalized.replace("/abs/", "/pdf/") + ".pdf");
+  }
+  if (/openaccess\.thecvf\.com\/content\//i.test(normalized) && /\/html\//i.test(normalized)) {
+    candidates.push(
+      normalized
+        .replace("/html/", "/papers/")
+        .replace(/\.html$/i, ".pdf")
+    );
+  }
+  if (/dl\.acm\.org\/doi\/abs\//i.test(normalized)) {
+    candidates.push(normalized.replace("/doi/abs/", "/doi/pdf/"));
+  }
+  if (/dl\.acm\.org\/doi\//i.test(normalized)) {
+    candidates.push(normalized.replace("/doi/", "/doi/pdf/"));
+  }
+  if (/ieeexplore\.ieee\.org\/(?:abstract\/)?document\/(\d+)/i.test(normalized)) {
+    const match = normalized.match(/ieeexplore\.ieee\.org\/(?:abstract\/)?document\/(\d+)/i);
+    if (match?.[1]) {
+      candidates.push(`https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=${match[1]}`);
+    }
+  }
+  if (/sciencedirect\.com\/science\/article\/pii\/([A-Z0-9]+)/i.test(normalized)) {
+    const match = normalized.match(/sciencedirect\.com\/science\/article\/pii\/([A-Z0-9]+)/i);
+    if (match?.[1]) {
+      candidates.push(`https://www.sciencedirect.com/science/article/pii/${match[1]}/pdfft?isDTMRedir=true&download=true`);
+    }
+  }
+  if (/cell\.com\/heliyon\/fulltext\//i.test(normalized)) {
+    const pii = normalized.split("/").pop() || "";
+    const compactPii = pii.replace(/[^A-Za-z0-9]/g, "");
+    if (compactPii) {
+      candidates.push(`https://www.sciencedirect.com/science/article/pii/${compactPii}/pdfft?isDTMRedir=true&download=true`);
+    }
+  }
+  if (publisher === "emerald" && ref.doi) {
+    candidates.push(`https://www.emerald.com/insight/content/doi/${ref.doi}/full/pdf`);
+  }
+
+  return uniquePreserveOrder(candidates.filter(Boolean));
+}
+
+async function tryDirectPdfFetch({ ref, url, destPath, logger }) {
+  if (!url) {
+    return null;
+  }
+
+  try {
+    await logger.log(ref, "direct_fetch", "start", url, "");
+    const response = await fetch(url, {
+      headers: {
+        "user-agent": "paper-downloader/0.1",
+        accept: "application/pdf,application/octet-stream;q=0.9,text/html;q=0.8,*/*;q=0.7"
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(45_000)
+    });
+
+    if (!response.ok) {
+      await logger.log(ref, "direct_fetch", "failed", url, `${response.status} ${response.statusText}`);
+      return null;
+    }
+
+    const body = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get("content-type") || "";
+    if (!isPdfContentType(contentType) && !isRealPdfBody(body)) {
+      await logger.log(ref, "direct_fetch", "failed", response.url || url, `non_pdf_content_type:${contentType}`);
+      return null;
+    }
+
+    await fs.writeFile(destPath, body);
+    const stats = await fs.stat(destPath);
+    await logger.log(ref, "direct_fetch", "downloaded", response.url || url, `${kbFromBytes(stats.size)}kb`);
+    return {
+      state: "downloaded",
+      sourceUrl: response.url || url,
+      sizeKb: kbFromBytes(stats.size)
+    };
+  } catch (error) {
+    await logger.log(ref, "direct_fetch", "failed", url, String(error?.message || error));
+    return null;
+  }
+}
+
 function attachArtifactCollector(page) {
   let firstPdfBody = null;
   let firstPdfUrl = "";
@@ -1335,7 +1440,9 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
         } else {
           const attemptUrls = uniquePreserveOrder([
             buildDirectPdfUrl(ref.doi, ref.publisher),
-            buildArticleUrl(ref.doi, ref.publisher)
+            buildArticleUrl(ref.doi, ref.publisher),
+            ref.article_url || ref.link || "",
+            ...derivePdfUrlsFromArticleUrl(ref.article_url || ref.link || "", ref, ref.publisher || "unknown")
           ]).filter(Boolean);
 
           if (attemptUrls.length === 0) {
@@ -1350,34 +1457,55 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
             };
           }
 
-          for (const attemptUrl of attemptUrls) {
-            const page = await context.newPage();
-            try {
-              const result = await attemptCaptureFromPage({
-                context,
-                page,
-                ref,
-                publisher: ref.publisher || "unknown",
-                destPath,
-                institution: config.institution,
-                auto,
-                logger,
-                visited: new Set(),
-                depth: 0,
-                url: attemptUrl
-              });
+          for (const candidateUrl of attemptUrls) {
+            const fetched = await tryDirectPdfFetch({
+              ref,
+              url: candidateUrl,
+              destPath,
+              logger
+            });
+            if (fetched) {
               finalResult = {
-                ...result,
+                ...fetched,
                 sourcePlatform: ref.source_platform || "",
-                articleUrl: ref.article_url || ref.link || attemptUrl,
+                articleUrl: ref.article_url || ref.link || candidateUrl,
                 matchConfidence: "",
-                downloadFormat: result.state === "downloaded" ? "pdf" : ""
+                downloadFormat: "pdf"
               };
-              if (result.state !== "failed_auto") {
-                break;
+              break;
+            }
+          }
+
+          if (finalResult.state !== "downloaded") {
+            for (const attemptUrl of attemptUrls) {
+              const page = await context.newPage();
+              try {
+                const result = await attemptCaptureFromPage({
+                  context,
+                  page,
+                  ref,
+                  publisher: ref.publisher || "unknown",
+                  destPath,
+                  institution: config.institution,
+                  auto,
+                  logger,
+                  visited: new Set(),
+                  depth: 0,
+                  url: attemptUrl
+                });
+                finalResult = {
+                  ...result,
+                  sourcePlatform: ref.source_platform || "",
+                  articleUrl: ref.article_url || ref.link || attemptUrl,
+                  matchConfidence: "",
+                  downloadFormat: result.state === "downloaded" ? "pdf" : ""
+                };
+                if (result.state !== "failed_auto") {
+                  break;
+                }
+              } finally {
+                await closePageQuietly(page);
               }
-            } finally {
-              await closePageQuietly(page);
             }
           }
         }

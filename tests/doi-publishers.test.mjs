@@ -24,6 +24,8 @@ test("extractDoiFromText finds DOI-like strings in free text", () => {
 test("detectPublisher prefers DOI prefix and falls back to journal names", () => {
   assert.equal(detectPublisher("10.1021/jacs.5c05017", ""), "acs");
   assert.equal(detectPublisher("10.9999/example", "Advanced Materials"), "wiley");
+  assert.equal(detectPublisher("10.3390/app142310811", "Applied Sciences"), "mdpi");
+  assert.equal(detectPublisher("10.9999/example", "Heritage Science"), "nature");
   assert.equal(detectPublisher("10.9999/example", "Unknown Journal"), "unknown");
 });
 

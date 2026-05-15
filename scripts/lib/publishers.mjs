@@ -2,14 +2,17 @@ import { normalizeDoi } from "./doi.mjs";
 
 export const PUBLISHER_MAP = {
   "10.1038": "nature",
+  "10.1186": "nature",
   "10.1021": "acs",
   "10.1126": "science",
   "10.1016": "elsevier",
   "10.1002": "wiley",
   "10.1039": "rsc",
   "10.1007": "springer",
+  "10.1108": "emerald",
   "10.1073": "pnas",
   "10.1149": "ecs",
+  "10.1145": "acm",
   "10.1088": "iop",
   "10.1103": "aps",
   "10.1146": "annualreviews",
@@ -19,7 +22,10 @@ export const PUBLISHER_MAP = {
   "10.1109": "ieee",
   "10.1143": "iop",
   "10.1147": "springer",
+  "10.18653": "acl",
+  "10.3390": "mdpi",
   "10.1364": "osa",
+  "10.48550": "arxiv",
   "10.3938": "kps",
   "10.3762": "beilstein"
 };
@@ -28,6 +34,9 @@ export const JOURNAL_PUBLISHER_MAP = {
   "nature": "nature",
   "nat ": "nature",
   "science": "science",
+  "heritage science": "nature",
+  "scientific reports": "nature",
+  "science advances": "science",
   "sci adv": "science",
   "sci. adv": "science",
   "acs ": "acs",
@@ -85,6 +94,11 @@ export const JOURNAL_SHORT = {
 
 export const PUBLISHER_STRATEGIES = {
   acs: { family: "generic_fallback", support: "stable" },
+  acl: { family: "generic_fallback", support: "stable" },
+  acm: { family: "generic_fallback", support: "stable" },
+  arxiv: { family: "generic_fallback", support: "stable" },
+  emerald: { family: "generic_fallback", support: "stable" },
+  mdpi: { family: "generic_fallback", support: "stable" },
   nature: { family: "generic_fallback", support: "stable" },
   science: { family: "generic_fallback", support: "stable" },
   elsevier: { family: "generic_fallback", support: "stable" },
@@ -108,6 +122,11 @@ export const PUBLISHER_STRATEGIES = {
 
 export const PDF_SELECTORS = {
   acs: ['a[href*="/doi/pdf/"]', 'a[title*="PDF"]', 'a:has-text("Download PDF")', 'a[href*="epdf"]'],
+  acl: ['a[href$=".pdf"]', 'a:has-text("PDF")', 'a:has-text("Download PDF")'],
+  acm: ['a[href*="/doi/pdf/"]', 'a:has-text("PDF")', 'a:has-text("Download PDF")'],
+  arxiv: ['a[href*="/pdf/"]', 'a:has-text("PDF")', 'a:has-text("Download PDF")'],
+  emerald: ['a[href*="/full/pdf"]', 'a[href*="Citation/Download"]', 'a:has-text("PDF")', 'a:has-text("Download PDF")'],
+  mdpi: ['a[href$="/pdf"]', 'a[href*="/pdf"]', 'a:has-text("PDF")', 'a:has-text("Download PDF")'],
   nature: ['a.c-pdf-download__link', 'a[data-track-action="download pdf"]', 'a[href*=".pdf"]', 'a:has-text("Download PDF")', 'a:has-text("PDF")'],
   science: ['a[href*="/doi/pdf/"]', 'a[href*="epdf"]', 'a:has-text("PDF")'],
   elsevier: ['a[href*="pdfft"]', 'a[href*="/pdf"]', 'a:has-text("Download PDF")', 'a:has-text("View PDF")', 'a:has-text("PDF")'],
@@ -196,6 +215,11 @@ export function buildDirectPdfUrl(rawDoi, publisher) {
   const natureSlug = doi.split("/").pop()?.replaceAll(".", "") || doi;
   const urls = {
     acs: `https://pubs.acs.org/doi/pdf/${doi}`,
+    acl: `https://aclanthology.org/${doi.replace(/^10\.18653\/v1\//, "")}.pdf`,
+    acm: `https://dl.acm.org/doi/pdf/${doi}`,
+    arxiv: `https://arxiv.org/pdf/${doi.split("/").pop()}.pdf`,
+    emerald: `https://www.emerald.com/insight/content/doi/${doi}/full/pdf`,
+    mdpi: `https://doi.org/${doi}`,
     nature: `https://www.nature.com/articles/${natureSlug}.pdf`,
     science: `https://www.science.org/doi/pdf/${doi}`,
     wiley: `https://onlinelibrary.wiley.com/doi/pdfdirect/${doi}`,
@@ -212,6 +236,11 @@ export function buildArticleUrl(rawDoi, publisher) {
   const doi = normalizeDoi(rawDoi);
   const natureSlug = doi.split("/").pop()?.replaceAll(".", "") || doi;
   const urls = {
+    acl: `https://aclanthology.org/${doi.replace(/^10\.18653\/v1\//, "")}/`,
+    acm: `https://dl.acm.org/doi/${doi}`,
+    arxiv: `https://arxiv.org/abs/${doi.split("/").pop()}`,
+    emerald: `https://www.emerald.com/insight/content/doi/${doi}/full/html`,
+    mdpi: `https://doi.org/${doi}`,
     nature: `https://www.nature.com/articles/${natureSlug}`,
     acs: `https://pubs.acs.org/doi/${doi}`,
     science: `https://www.science.org/doi/${doi}`,
