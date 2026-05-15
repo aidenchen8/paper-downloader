@@ -5,7 +5,9 @@ const usage = [
   "Usage:",
   "  node scripts/run-paper-downloader.mjs <doi-or-document> [--output-dir <path>] [--config <path>]",
   "    [--browser chrome|msedge] [--profile <name>] [--user-data-dir <path>]",
-  "    [--headless] [--yes] [--auto] [--refresh-extract]"
+  "    [--headless] [--yes] [--auto] [--refresh-extract]",
+  "    [--oa-only|--skip-browser] [--no-oa] [--publisher-direct-fetch]",
+  "    [--no-authenticated-direct-fetch] [--no-manual-queue]"
 ];
 
 async function main() {

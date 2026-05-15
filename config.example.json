@@ -11,6 +11,23 @@
     "headless": false,
     "slowMoMs": 0
   },
+  "openAccess": {
+    "enabled": true,
+    "providers": ["unpaywall", "openalex", "semantic_scholar", "europepmc", "arxiv"],
+    "unpaywallEmail": "",
+    "openalexApiKey": "",
+    "semanticScholarApiKey": "",
+    "requestDelayMs": 250
+  },
+  "download": {
+    "browserFallback": true,
+    "publisherDirectFetch": false,
+    "authenticatedDirectFetch": true,
+    "manualInterventionQueue": true,
+    "directRequestDelayMs": 350,
+    "browserAttemptDelayMs": 1500,
+    "itemDelayMs": 750
+  },
   "institution": {
     "authHosts": [],
     "authUrlFragments": [],

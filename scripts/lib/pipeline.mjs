@@ -225,6 +225,8 @@ export async function downloadRefsStage({ projectArg, config, auto = false }) {
   await updateProjectMeta(path.join(projectDir, "project_meta.json"), {
     download_report: path.join(projectDir, "download_report.csv"),
     download_summary: result.summaryPath,
+    manual_intervention_queue: result.manualQueuePath || "",
+    manual_intervention_markdown: result.manualMarkdownPath || "",
     last_run_dir: result.runDir,
     downloaded_at: nowIso(),
     updated_at: nowIso()
@@ -261,7 +263,8 @@ export async function runRefDownloader(inputValue, options = {}) {
   }
   process.stdout.write(`PROJECT:     ${projectName}\n`);
   process.stdout.write(`OUTPUT DIR:  ${outputDir}\n`);
-  process.stdout.write(`BROWSER:     ${browserRuntime.channel} @ ${browserRuntime.userDataDir}\n`);
+  process.stdout.write(`OA FIRST:    ${config.openAccess.enabled ? config.openAccess.providers.join(",") : "disabled"}\n`);
+  process.stdout.write(`BROWSER:     ${config.download.browserFallback ? `${browserRuntime.channel} @ ${browserRuntime.userDataDir}` : "disabled"}\n`);
 
   if (!options.yes) {
     const answer = await promptLine("按回车开始；输入 n 取消: ");
@@ -309,6 +312,9 @@ export async function runRefDownloader(inputValue, options = {}) {
   const reportSummary = summarizeByStatus(downloaded.rows, "pdf_status");
   process.stdout.write(`  Report: ${path.join(paths.projectDir, "download_report.csv")}\n`);
   process.stdout.write(`  Summary file: ${downloaded.summaryPath}\n`);
+  if (downloaded.manualQueuePath) {
+    process.stdout.write(`  Manual queue: ${downloaded.manualQueuePath} (${downloaded.manualQueue?.length || 0})\n`);
+  }
   process.stdout.write(`  Summary: ${JSON.stringify(reportSummary)}\n`);
   if (downloaded.summary?.failed?.length) {
     process.stdout.write(`  Failed refs: ${downloaded.summary.failed.length}\n`);

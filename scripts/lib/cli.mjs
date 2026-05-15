@@ -6,7 +6,13 @@ const BOOLEAN_FLAGS = new Set([
   "auto",
   "headless",
   "help",
+  "noAuthenticatedDirectFetch",
+  "noManualQueue",
+  "noOa",
+  "oaOnly",
+  "publisherDirectFetch",
   "refreshExtract",
+  "skipBrowser",
   "yes"
 ]);
 

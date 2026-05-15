@@ -171,7 +171,9 @@ export function detectPublisher(rawDoi, journal = "") {
     return mapped;
   }
   const loweredJournal = journal.toLowerCase();
-  for (const [fragment, publisher] of Object.entries(JOURNAL_PUBLISHER_MAP)) {
+  const journalMatches = Object.entries(JOURNAL_PUBLISHER_MAP)
+    .sort(([left], [right]) => right.length - left.length);
+  for (const [fragment, publisher] of journalMatches) {
     if (loweredJournal.includes(fragment)) {
       return publisher;
     }

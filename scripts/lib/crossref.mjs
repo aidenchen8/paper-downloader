@@ -397,7 +397,7 @@ export async function enrichReference(reference, mailto) {
     .join(", ");
   const journal = Array.isArray(message["container-title"]) ? message["container-title"][0] || "" : "";
   const year = extractYear(message);
-  const publisher = detectPublisher(reference.doi, journal);
+  const publisher = detectPublisher(resolution.doi, journal);
 
   return {
     id: reference.id,

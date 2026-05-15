@@ -4,7 +4,9 @@ import { downloadRefsStage, loadRuntimeConfig } from "./lib/pipeline.mjs";
 const usage = [
   "Usage:",
   "  node scripts/download-refs.mjs <project-dir-or-refs_validated.json> [--config <path>]",
-  "    [--browser chrome|msedge] [--profile <name>] [--user-data-dir <path>] [--headless] [--auto]"
+  "    [--browser chrome|msedge] [--profile <name>] [--user-data-dir <path>] [--headless] [--auto]",
+  "    [--oa-only|--skip-browser] [--no-oa] [--publisher-direct-fetch]",
+  "    [--no-authenticated-direct-fetch] [--no-manual-queue]"
 ];
 
 async function main() {

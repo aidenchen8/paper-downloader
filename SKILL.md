@@ -23,11 +23,15 @@ description: >
 - Supported document types: `pdf`, `docx`, `txt`, `md`, `html`, `htm`, `rtf`.
 - For document input, the skill first extracts the reference list from the document itself.
 - DOI resolution order per reference: existing DOI -> article link -> Crossref search from citation text.
-- English references follow the DOI/publisher route.
+- English DOI references use an OA-first chain before browser automation: Unpaywall -> OpenAlex -> Semantic Scholar -> Europe PMC/PMC -> arXiv.
+- English references fall back to the DOI/publisher route only after OA candidates fail.
 - Chinese references follow a conservative platform route: direct article link -> `wanfang` -> `cqvip` -> `cnki`.
 - Mixed Chinese/English reference lists can be processed in one run.
 - Failed items do not stop the batch; the skill writes both row-level and summary-level failure reports.
-- School SSO and browser challenges can be handled interactively in the real browser window.
+- The real Chrome/Edge profile is launched lazily only when OA/direct routes cannot download a verified PDF.
+- Once the browser context is open, candidate PDFs are first fetched through the same BrowserContext request session before clicking page controls.
+- Background runs create a manual intervention queue so humans only handle blocked or judgment-heavy references.
+- School SSO and browser challenges can be handled interactively in the real browser window. Do not bypass CAPTCHA, Cloudflare, or publisher access controls.
 
 ## Install prerequisites
 
@@ -42,6 +46,7 @@ cp config.example.json config.local.json
 Then edit `config.local.json`:
 
 - Set `crossref.mailto` to a real email.
+- Optionally set `openAccess.unpaywallEmail`; if left blank, the skill reuses `crossref.mailto`.
 - Leave `browser.channel` as `chrome` unless the user explicitly wants Edge.
 - If the user does not use the default browser profile, set `browser.profileDirectory`.
 - If Chrome or Edge stores profile data in a non-default location, set `browser.userDataDir`.
@@ -74,6 +79,11 @@ Useful flags:
 - `--output-dir <path>`
 - `--yes` to skip the confirmation prompt
 - `--auto` to avoid waiting for manual login/captcha handling and mark such refs as `manual_pending`
+- `--oa-only` or `--skip-browser` to resolve only publicly available OA PDFs and never launch the browser
+- `--no-oa` to disable the OA resolver for debugging
+- `--publisher-direct-fetch` to opt into publisher direct fetch after OA misses and before browser fallback
+- `--no-authenticated-direct-fetch` to disable BrowserContext cookie-sharing PDF requests
+- `--no-manual-queue` to skip writing `manual_intervention.md` and `manual_intervention_queue.json`
 
 ## Pre-flight checklist
 
@@ -83,7 +93,9 @@ Before running:
 2. If the input is a document, confirm it actually contains a reference list or bibliography section.
 3. Ask the user to fully close Chrome or Edge first. Persistent profile launch needs exclusive access.
 4. Confirm `config.local.json` exists and `crossref.mailto` is not the placeholder.
-5. Tell the user that a real browser window may open for institutional login or anti-bot checks.
+5. For OA-heavy batches, prefer an initial `--oa-only` run to avoid unnecessary RPA.
+6. Tell the user that a real browser window may open for institutional login or anti-bot checks only for refs that lack public PDFs.
+7. For long unattended batches, prefer `--yes --auto`; review `manual_intervention.md` afterward and rerun once the user has handled the blocked pages.
 
 ## Output layout
 
@@ -94,6 +106,8 @@ Before running:
 │   ├── refs_validated.json
 │   ├── download_report.csv
 │   ├── download_summary.json
+│   ├── manual_intervention.md
+│   ├── manual_intervention_queue.json
 │   ├── project_meta.json
 │   └── *.pdf
 └── runs/
@@ -106,6 +120,9 @@ Before running:
 
 - If the downloader lands on a school login page or browser challenge page, it will pause and ask the user to finish it in the real browser window.
 - If the user wants a non-interactive run, use `--auto`; those refs become `manual_pending` instead of blocking the whole run.
+- In non-interactive runs, read `manual_intervention.md` before asking the user to retry; it contains the exact refs, source links, reasons, and suggested human actions.
+- Do not ask the user to manually inject cookies. The downloader may reuse the authorized browser context via Playwright's shared request session, but it must not export, forge, or bypass cookies.
+- Do not attempt to solve, bypass, hide from, or defeat CAPTCHA/Cloudflare/anti-bot systems. Reduce challenge frequency by using OA-first resolution, conservative delays, and browser fallback only when needed.
 - Re-running is incremental enough for day-to-day use because existing PDFs are skipped automatically.
 - If a reference has no DOI, the validator will try article links first, then a Crossref bibliographic search.
 - Chinese-platform candidates are validated conservatively before download; if title/author/year evidence is not strong enough, the skill should skip the item and report why.

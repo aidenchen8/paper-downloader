@@ -16,6 +16,23 @@ const DEFAULT_CONFIG = {
     headless: false,
     slowMoMs: 0
   },
+  openAccess: {
+    enabled: true,
+    providers: ["unpaywall", "openalex", "semantic_scholar", "europepmc", "arxiv"],
+    unpaywallEmail: "",
+    openalexApiKey: "",
+    semanticScholarApiKey: "",
+    requestDelayMs: 250
+  },
+  download: {
+    browserFallback: true,
+    publisherDirectFetch: false,
+    authenticatedDirectFetch: true,
+    manualInterventionQueue: true,
+    directRequestDelayMs: 350,
+    browserAttemptDelayMs: 1500,
+    itemDelayMs: 750
+  },
   institution: {
     authHosts: [],
     authUrlFragments: [],
@@ -119,6 +136,33 @@ function applyEnvOverrides(config, env = process.env) {
   if (env.PAPER_DOWNLOADER_HEADLESS) {
     output.browser.headless = parseBoolean(env.PAPER_DOWNLOADER_HEADLESS);
   }
+  if (env.PAPER_DOWNLOADER_OA_ENABLED) {
+    output.openAccess.enabled = parseBoolean(env.PAPER_DOWNLOADER_OA_ENABLED, true);
+  }
+  if (env.PAPER_DOWNLOADER_OA_PROVIDERS) {
+    output.openAccess.providers = parseList(env.PAPER_DOWNLOADER_OA_PROVIDERS);
+  }
+  if (env.PAPER_DOWNLOADER_UNPAYWALL_EMAIL) {
+    output.openAccess.unpaywallEmail = env.PAPER_DOWNLOADER_UNPAYWALL_EMAIL;
+  }
+  if (env.PAPER_DOWNLOADER_OPENALEX_API_KEY) {
+    output.openAccess.openalexApiKey = env.PAPER_DOWNLOADER_OPENALEX_API_KEY;
+  }
+  if (env.PAPER_DOWNLOADER_SEMANTIC_SCHOLAR_API_KEY) {
+    output.openAccess.semanticScholarApiKey = env.PAPER_DOWNLOADER_SEMANTIC_SCHOLAR_API_KEY;
+  }
+  if (env.PAPER_DOWNLOADER_BROWSER_FALLBACK) {
+    output.download.browserFallback = parseBoolean(env.PAPER_DOWNLOADER_BROWSER_FALLBACK, true);
+  }
+  if (env.PAPER_DOWNLOADER_PUBLISHER_DIRECT_FETCH) {
+    output.download.publisherDirectFetch = parseBoolean(env.PAPER_DOWNLOADER_PUBLISHER_DIRECT_FETCH);
+  }
+  if (env.PAPER_DOWNLOADER_AUTHENTICATED_DIRECT_FETCH) {
+    output.download.authenticatedDirectFetch = parseBoolean(env.PAPER_DOWNLOADER_AUTHENTICATED_DIRECT_FETCH, true);
+  }
+  if (env.PAPER_DOWNLOADER_MANUAL_QUEUE) {
+    output.download.manualInterventionQueue = parseBoolean(env.PAPER_DOWNLOADER_MANUAL_QUEUE, true);
+  }
   if (env.PAPER_DOWNLOADER_AUTH_HOSTS) {
     output.institution.authHosts = parseList(env.PAPER_DOWNLOADER_AUTH_HOSTS);
   }
@@ -152,6 +196,25 @@ function normalizeConfig(config) {
       disableExtensions: parseBoolean(merged.browser?.disableExtensions),
       headless: parseBoolean(merged.browser?.headless),
       slowMoMs: Number(merged.browser?.slowMoMs || 0)
+    },
+    openAccess: {
+      enabled: parseBoolean(merged.openAccess?.enabled, true),
+      providers: parseList(merged.openAccess?.providers).length
+        ? parseList(merged.openAccess?.providers)
+        : [...DEFAULT_CONFIG.openAccess.providers],
+      unpaywallEmail: String(merged.openAccess?.unpaywallEmail || "").trim(),
+      openalexApiKey: String(merged.openAccess?.openalexApiKey || "").trim(),
+      semanticScholarApiKey: String(merged.openAccess?.semanticScholarApiKey || "").trim(),
+      requestDelayMs: Math.max(0, Number(merged.openAccess?.requestDelayMs ?? DEFAULT_CONFIG.openAccess.requestDelayMs))
+    },
+    download: {
+      browserFallback: parseBoolean(merged.download?.browserFallback, true),
+      publisherDirectFetch: parseBoolean(merged.download?.publisherDirectFetch),
+      authenticatedDirectFetch: parseBoolean(merged.download?.authenticatedDirectFetch, true),
+      manualInterventionQueue: parseBoolean(merged.download?.manualInterventionQueue, true),
+      directRequestDelayMs: Math.max(0, Number(merged.download?.directRequestDelayMs ?? DEFAULT_CONFIG.download.directRequestDelayMs)),
+      browserAttemptDelayMs: Math.max(0, Number(merged.download?.browserAttemptDelayMs ?? DEFAULT_CONFIG.download.browserAttemptDelayMs)),
+      itemDelayMs: Math.max(0, Number(merged.download?.itemDelayMs ?? DEFAULT_CONFIG.download.itemDelayMs))
     },
     institution: {
       authHosts: parseList(merged.institution?.authHosts),
@@ -195,7 +258,7 @@ export async function loadConfig({ cliConfigPath = "", skillRoot = SKILL_ROOT, e
 }
 
 export function applyCliOverrides(config, options = {}) {
-  const merged = deepMerge({}, config);
+  const merged = deepMerge(DEFAULT_CONFIG, config);
   if (options.browser) {
     merged.browser.channel = String(options.browser);
   }
@@ -210,6 +273,21 @@ export function applyCliOverrides(config, options = {}) {
   }
   if (options.headless) {
     merged.browser.headless = true;
+  }
+  if (options.oaOnly || options.skipBrowser) {
+    merged.download.browserFallback = false;
+  }
+  if (options.noOa) {
+    merged.openAccess.enabled = false;
+  }
+  if (options.publisherDirectFetch) {
+    merged.download.publisherDirectFetch = true;
+  }
+  if (options.noAuthenticatedDirectFetch) {
+    merged.download.authenticatedDirectFetch = false;
+  }
+  if (options.noManualQueue) {
+    merged.download.manualInterventionQueue = false;
   }
   return normalizeConfig(merged);
 }

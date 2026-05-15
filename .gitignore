@@ -5,3 +5,5 @@ node_modules/
 runs/
 *_refs/
 output/*
+_paper_downloader_preview/*
+_paper_downloader_oa/*

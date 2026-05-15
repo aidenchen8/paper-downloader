@@ -11,6 +11,7 @@ import {
   writeCsv,
   writeJson
 } from "./io.mjs";
+import { resolveOpenAccessCandidates } from "./open-access-resolver.mjs";
 import {
   buildArticleUrl,
   buildDirectPdfUrl,
@@ -33,6 +34,19 @@ const LOADING_WAIT_MS = 20_000;
 const ARTIFACT_WAIT_MS = 1_800;
 const CLICK_WAIT_MS = 1_400;
 const MAX_CAPTURE_DEPTH = 2;
+const MIN_PDF_BYTES = 10_000;
+
+const HUMAN_REVIEW_STATUSES = new Set([
+  "manual_pending",
+  "failed_auto",
+  "failed_exception",
+  "no_doi"
+]);
+
+const LOW_VALUE_REVIEW_REASONS = new Set([
+  "ignored",
+  "browser_fallback_disabled_for_chinese_platform"
+]);
 
 const CAPTCHA_SELECTORS = [
   "#px-captcha",
@@ -166,6 +180,36 @@ function isPdfContentType(contentType = "") {
   return String(contentType).toLowerCase().includes("pdf");
 }
 
+function isExternalHttpUrl(url = "") {
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return false;
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === "localhost" ||
+      hostname === "0.0.0.0" ||
+      hostname === "::1" ||
+      hostname.endsWith(".localhost") ||
+      hostname === "metadata.google.internal" ||
+      hostname === "169.254.169.254"
+    ) {
+      return false;
+    }
+    if (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) {
+      return false;
+    }
+    const private172 = hostname.match(/^172\.(\d+)\./);
+    if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isRealPdfBody(body) {
   if (!body || body.length < 5) return false;
   const header = body.slice(0, 5).toString("ascii");
@@ -294,7 +338,9 @@ function buildReportRow(ref, extra = {}) {
     resolution_source: ref.resolution_source || "",
     publisher_strategy: strategy.family,
     publisher_support: strategy.support,
+    oa_source: "",
     pdf_file: "",
+    target_pdf_file: "",
     pdf_status: "",
     download_format: "",
     pdf_size_kb: "",
@@ -384,6 +430,10 @@ async function tryDirectPdfFetch({ ref, url, destPath, logger }) {
   if (!url) {
     return null;
   }
+  if (!isExternalHttpUrl(url)) {
+    await logger.log(ref, "direct_fetch", "blocked", url, "unsafe_or_non_http_url");
+    return null;
+  }
 
   try {
     await logger.log(ref, "direct_fetch", "start", url, "");
@@ -403,8 +453,12 @@ async function tryDirectPdfFetch({ ref, url, destPath, logger }) {
 
     const body = Buffer.from(await response.arrayBuffer());
     const contentType = response.headers.get("content-type") || "";
-    if (!isPdfContentType(contentType) && !isRealPdfBody(body)) {
+    if (!isRealPdfBody(body)) {
       await logger.log(ref, "direct_fetch", "failed", response.url || url, `non_pdf_content_type:${contentType}`);
+      return null;
+    }
+    if (body.length < MIN_PDF_BYTES) {
+      await logger.log(ref, "direct_fetch", "failed", response.url || url, `pdf_too_small:${body.length}`);
       return null;
     }
 
@@ -418,6 +472,61 @@ async function tryDirectPdfFetch({ ref, url, destPath, logger }) {
     };
   } catch (error) {
     await logger.log(ref, "direct_fetch", "failed", url, String(error?.message || error));
+    return null;
+  }
+}
+
+async function tryContextPdfFetch({ context, ref, url, referer = "", destPath, logger }) {
+  if (!url) {
+    return null;
+  }
+  if (!isExternalHttpUrl(url)) {
+    await logger.log(ref, "context_fetch", "blocked", url, "unsafe_or_non_http_url");
+    return null;
+  }
+
+  try {
+    await logger.log(ref, "context_fetch", "start", url, referer ? `referer=${referer}` : "");
+    const headers = {
+      accept: "application/pdf,application/octet-stream;q=0.9,text/html;q=0.8,*/*;q=0.7"
+    };
+    if (referer && isExternalHttpUrl(referer)) {
+      headers.referer = referer;
+    }
+
+    const response = await context.request.get(url, {
+      headers,
+      timeout: 45_000,
+      failOnStatusCode: false
+    });
+
+    if (!response.ok()) {
+      await logger.log(ref, "context_fetch", "failed", url, `${response.status()} ${response.statusText()}`);
+      return null;
+    }
+
+    const body = await response.body();
+    const contentType = response.headers()["content-type"] || "";
+    const finalUrl = typeof response.url === "function" ? response.url() : url;
+    if (!isRealPdfBody(body)) {
+      await logger.log(ref, "context_fetch", "failed", finalUrl || url, `non_pdf_content_type:${contentType}`);
+      return null;
+    }
+    if (body.length < MIN_PDF_BYTES) {
+      await logger.log(ref, "context_fetch", "failed", finalUrl || url, `pdf_too_small:${body.length}`);
+      return null;
+    }
+
+    await fs.writeFile(destPath, body);
+    const stats = await fs.stat(destPath);
+    await logger.log(ref, "context_fetch", "downloaded", finalUrl || url, `${kbFromBytes(stats.size)}kb`);
+    return {
+      state: "downloaded",
+      sourceUrl: finalUrl || url,
+      sizeKb: kbFromBytes(stats.size)
+    };
+  } catch (error) {
+    await logger.log(ref, "context_fetch", "failed", url, String(error?.message || error));
     return null;
   }
 }
@@ -441,7 +550,7 @@ function attachArtifactCollector(page) {
         return;
       }
       const body = await response.body();
-      if (body && body.length > 4_000 && isRealPdfBody(body)) {
+      if (body && body.length >= MIN_PDF_BYTES && isRealPdfBody(body)) {
         firstPdfBody = body;
         firstPdfUrl = response.url();
       }
@@ -474,11 +583,11 @@ function attachArtifactCollector(page) {
         } finally {
           await fd.close();
         }
-        if (!isRealPdfBody(checkBuf)) {
+        const stats = await fs.stat(destPath);
+        if (!isRealPdfBody(checkBuf) || stats.size < MIN_PDF_BYTES) {
           await fs.unlink(destPath).catch(() => {});
           return null;
         }
-        const stats = await fs.stat(destPath);
         return {
           state: "downloaded",
           sourceUrl: typeof firstDownload.url === "function" ? firstDownload.url() : page.url(),
@@ -669,6 +778,41 @@ async function collectCandidateUrls(page, publisher) {
   ).slice(0, 8);
 }
 
+async function attemptContextCandidateFetches({
+  context,
+  page,
+  ref,
+  publisher,
+  destPath,
+  logger,
+  requestDelayMs = 0
+}) {
+  const currentUrl = page.url() || "";
+  const candidateUrls = uniquePreserveOrder([
+    buildPdfHints(currentUrl) ? currentUrl : "",
+    ...(await collectCandidateUrls(page, publisher))
+  ].filter(Boolean)).slice(0, 6);
+
+  for (const [index, candidateUrl] of candidateUrls.entries()) {
+    if (index > 0 && requestDelayMs) {
+      await sleep(requestDelayMs);
+    }
+    const fetched = await tryContextPdfFetch({
+      context,
+      ref,
+      url: candidateUrl,
+      referer: currentUrl,
+      destPath,
+      logger
+    });
+    if (fetched) {
+      return fetched;
+    }
+  }
+
+  return null;
+}
+
 async function captureFromPopupIfAny(context, knownPages, runner) {
   const newPages = context.pages().filter((page) => !knownPages.has(page) && !page.isClosed());
   const popup = newPages.at(-1);
@@ -678,7 +822,20 @@ async function captureFromPopupIfAny(context, knownPages, runner) {
   return runner(popup);
 }
 
-async function tryClickSelectors({ page, context, ref, publisher, destPath, collector, institution, auto, logger, visited, depth }) {
+async function tryClickSelectors({
+  page,
+  context,
+  ref,
+  publisher,
+  destPath,
+  collector,
+  institution,
+  auto,
+  logger,
+  visited,
+  depth,
+  authenticatedDirectFetch
+}) {
   const selectors = uniquePreserveOrder([
     ...getPdfSelectors(publisher),
     ...VIEWER_DOWNLOAD_SELECTORS
@@ -727,7 +884,8 @@ async function tryClickSelectors({ page, context, ref, publisher, destPath, coll
           logger,
           visited,
           depth: depth + 1,
-          url: ""
+          url: "",
+          authenticatedDirectFetch
         });
         await closePageQuietly(popup);
         return outcome;
@@ -753,7 +911,8 @@ async function attemptCaptureFromPage({
   logger,
   visited,
   depth,
-  url
+  url,
+  authenticatedDirectFetch = { enabled: false, requestDelayMs: 0 }
 }) {
   if (depth > MAX_CAPTURE_DEPTH) {
     return { state: "failed_auto", reason: "capture_depth_exceeded", sourceUrl: url || page.url() };
@@ -791,6 +950,21 @@ async function attemptCaptureFromPage({
     }
 
     const currentUrl = page.url() || url || "";
+    if (authenticatedDirectFetch?.enabled) {
+      const fetchedFromContext = await attemptContextCandidateFetches({
+        context,
+        page,
+        ref,
+        publisher,
+        destPath,
+        logger,
+        requestDelayMs: authenticatedDirectFetch.requestDelayMs || 0
+      });
+      if (fetchedFromContext) {
+        return fetchedFromContext;
+      }
+    }
+
     if (buildPdfHints(currentUrl)) {
       const afterViewerClick = await tryClickSelectors({
         page,
@@ -803,7 +977,8 @@ async function attemptCaptureFromPage({
         auto,
         logger,
         visited,
-        depth
+        depth,
+        authenticatedDirectFetch
       });
       if (afterViewerClick) {
         return afterViewerClick;
@@ -824,7 +999,8 @@ async function attemptCaptureFromPage({
           logger,
           visited,
           depth: depth + 1,
-          url: candidateUrl
+          url: candidateUrl,
+          authenticatedDirectFetch
         });
         if (childResult.state !== "failed_auto") {
           return childResult;
@@ -845,7 +1021,8 @@ async function attemptCaptureFromPage({
       auto,
       logger,
       visited,
-      depth
+      depth,
+      authenticatedDirectFetch
     });
     if (clickResult) {
       return clickResult;
@@ -1040,7 +1217,17 @@ async function collectSearchResultCandidates(page, platform, ref) {
     .slice(0, 6);
 }
 
-async function resolveChineseArticleCandidate({ context, ref, platform, candidate, institution, auto, logger, destPath }) {
+async function resolveChineseArticleCandidate({
+  context,
+  ref,
+  platform,
+  candidate,
+  institution,
+  auto,
+  logger,
+  destPath,
+  authenticatedDirectFetch
+}) {
   const page = await context.newPage();
   try {
     const publisher = platform === "cqvip" ? "unknown" : platform;
@@ -1103,7 +1290,8 @@ async function resolveChineseArticleCandidate({ context, ref, platform, candidat
       logger,
       visited: new Set([candidate.href]),
       depth: 0,
-      url: ""
+      url: "",
+      authenticatedDirectFetch
     });
 
     if (result.state === "downloaded") {
@@ -1141,7 +1329,15 @@ async function resolveChineseArticleCandidate({ context, ref, platform, candidat
   }
 }
 
-async function attemptChinesePlatformDownload({ context, ref, destPath, institution, auto, logger }) {
+async function attemptChinesePlatformDownload({
+  context,
+  ref,
+  destPath,
+  institution,
+  auto,
+  logger,
+  authenticatedDirectFetch
+}) {
   const platforms = buildPreferredChinesePlatforms(ref);
   let fallbackResult = {
     state: "failed_auto",
@@ -1176,7 +1372,8 @@ async function attemptChinesePlatformDownload({ context, ref, destPath, institut
         institution,
         auto,
         logger,
-        destPath
+        destPath,
+        authenticatedDirectFetch
       });
       if (directResult.state === "downloaded" || directResult.state === "manual_pending") {
         return directResult;
@@ -1264,7 +1461,8 @@ async function attemptChinesePlatformDownload({ context, ref, destPath, institut
           institution,
           auto,
           logger,
-          destPath
+          destPath,
+          authenticatedDirectFetch
         });
         if (candidateResult.state === "downloaded" || candidateResult.state === "manual_pending") {
           return candidateResult;
@@ -1302,6 +1500,7 @@ function summarizeDownloadRows(rows = []) {
         doi: row.doi,
         file: row.pdf_file,
         status,
+        oa_source: row.oa_source || "",
         source_platform: row.source_platform || ""
       });
       continue;
@@ -1326,91 +1525,256 @@ function summarizeDownloadRows(rows = []) {
   };
 }
 
+function needsHumanIntervention(row) {
+  const status = row.pdf_status || "";
+  if (!HUMAN_REVIEW_STATUSES.has(status)) {
+    return false;
+  }
+  if (LOW_VALUE_REVIEW_REASONS.has(row.notes || "")) {
+    return false;
+  }
+  return true;
+}
+
+function interventionKind(row) {
+  if (row.pdf_status === "manual_pending") {
+    return "blocked";
+  }
+  if (row.pdf_status === "no_doi") {
+    return "metadata";
+  }
+  if (row.pdf_status === "failed_exception") {
+    return "error";
+  }
+  return "review";
+}
+
+function suggestedHumanAction(row) {
+  const reason = row.notes || "";
+  if (row.pdf_status === "manual_pending") {
+    if (reason.includes("institution_auth_redirect")) {
+      return "Finish institutional login in the browser, then rerun the downloader interactively or normally.";
+    }
+    if (reason.includes("captcha") || reason.includes("challenge")) {
+      return "Complete the visible human verification in the browser, then rerun the downloader.";
+    }
+    return "Inspect the opened page, resolve the blocking prompt, then rerun the downloader.";
+  }
+  if (row.pdf_status === "no_doi") {
+    return "Provide or fix DOI/article URL metadata, then rerun validation and download.";
+  }
+  if (reason === "caj_only_not_supported") {
+    return "Decide whether this item can be accepted as CAJ or locate a PDF version manually.";
+  }
+  if (reason === "strict_match_not_met") {
+    return "Open the candidate page and confirm title/author/year before any manual download.";
+  }
+  return "Inspect the source URL or DOI page manually; if the site is accessible, rerun after the browser session is ready.";
+}
+
+export function buildManualInterventionQueue(rows = []) {
+  return rows
+    .filter(needsHumanIntervention)
+    .map((row) => ({
+      id: row.id,
+      kind: interventionKind(row),
+      status: row.pdf_status || "",
+      reason: row.notes || "",
+      title: row.title || "",
+      doi: row.doi || "",
+      publisher: row.publisher || "",
+      source_platform: row.source_platform || "",
+      article_url: row.article_url || "",
+      source_url: row.source_url || "",
+      target_pdf_file: row.target_pdf_file || row.pdf_file || "",
+      suggested_action: suggestedHumanAction(row)
+    }));
+}
+
+function markdownLink(url = "") {
+  if (!url) {
+    return "";
+  }
+  return `[open](${url})`;
+}
+
+export function renderManualInterventionMarkdown(queue = [], generatedAt = nowIso()) {
+  const lines = [
+    "# Manual Intervention Queue",
+    "",
+    `Generated: ${generatedAt}`,
+    "",
+    "This file lists references where automation could not safely finish. Complete institutional login or visible verification in the real browser; do not bypass CAPTCHA, Cloudflare, or publisher access controls.",
+    ""
+  ];
+
+  if (queue.length === 0) {
+    lines.push("No human intervention is needed for the latest run.");
+    lines.push("");
+    return `${lines.join("\n")}\n`;
+  }
+
+  lines.push("| ID | Kind | Status | Reason | Title | Link | Suggested Action |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- |");
+  for (const item of queue) {
+    const link = markdownLink(item.source_url || item.article_url || (item.doi ? `https://doi.org/${item.doi}` : ""));
+    const title = String(item.title || item.doi || `Ref ${item.id}`).replaceAll("|", "\\|").slice(0, 120);
+    const action = String(item.suggested_action || "").replaceAll("|", "\\|");
+    const reason = String(item.reason || "").replaceAll("|", "\\|");
+    lines.push(`| ${item.id} | ${item.kind} | ${item.status} | ${reason} | ${title} | ${link} | ${action} |`);
+  }
+  lines.push("");
+  lines.push("After human handling, rerun the same downloader command. Existing PDFs are skipped automatically, so the rerun concentrates on unresolved items.");
+  lines.push("");
+  return `${lines.join("\n")}\n`;
+}
+
 function printProgress(index, total, ref) {
   const label = ref.label || `Ref${ref.id}`;
   process.stdout.write(`[${String(index).padStart(2, " ")} / ${total}] ${label} (${ref.publisher || "unknown"})\n`);
 }
 
-export async function downloadValidatedReferences({ projectDir, validatedData, config, auto = false }) {
-  let playwrightModule;
-  try {
-    playwrightModule = await import("playwright");
-  } catch (error) {
-    throw new Error(`Playwright is not installed. Run "npm install" inside ${projectDir}: ${error.message}`);
+async function attemptOpenAccessDownload({ ref, destPath, config, logger }) {
+  const resolved = await resolveOpenAccessCandidates(ref, config);
+  const details = [
+    `candidates=${resolved.candidates.length}`,
+    resolved.warnings.length ? `warnings=${resolved.warnings.join(";")}` : "",
+    resolved.errors.length ? `errors=${resolved.errors.join(";")}` : ""
+  ].filter(Boolean).join(" ");
+
+  await logger.log(ref, "oa_resolve", resolved.candidates.length ? "found" : "empty", "", details);
+  if (resolved.candidates.length === 0) {
+    return {
+      state: "failed_auto",
+      reason: resolved.errors.length ? `oa_resolve_failed:${resolved.errors.join(";")}` : "oa_no_candidate",
+      sourceUrl: "",
+      sourcePlatform: "",
+      articleUrl: ref.article_url || ref.link || "",
+      matchConfidence: "",
+      downloadFormat: "",
+      oaSource: ""
+    };
   }
 
-  const { chromium } = playwrightModule;
+  for (const [index, candidate] of resolved.candidates.entries()) {
+    if (index > 0 && config.openAccess?.requestDelayMs) {
+      await sleep(config.openAccess.requestDelayMs);
+    }
+    await logger.log(ref, "oa_candidate", "start", candidate.url, candidate.source);
+    const fetched = await tryDirectPdfFetch({
+      ref,
+      url: candidate.url,
+      destPath,
+      logger
+    });
+    if (fetched) {
+      return {
+        ...fetched,
+        sourcePlatform: "",
+        articleUrl: candidate.landingUrl || ref.article_url || ref.link || candidate.url,
+        matchConfidence: "",
+        downloadFormat: "pdf",
+        oaSource: candidate.source
+      };
+    }
+  }
+
+  return {
+    state: "failed_auto",
+    reason: "oa_candidates_not_pdf",
+    sourceUrl: resolved.candidates.at(-1)?.url || "",
+    sourcePlatform: "",
+    articleUrl: ref.article_url || ref.link || "",
+    matchConfidence: "",
+    downloadFormat: "",
+    oaSource: resolved.candidates.map((candidate) => candidate.source).join("|")
+  };
+}
+
+export async function downloadValidatedReferences({ projectDir, validatedData, config, auto = false }) {
   const rows = [];
   const runsRoot = path.join(path.dirname(projectDir), "runs");
   const logger = await createRunLogger(runsRoot);
   const downloadTempDir = path.join(logger.runDir, "downloads");
   await ensureDir(downloadTempDir);
-
-  const runtime = resolveBrowserRuntime(config.browser);
-  const launchOptions = {
-    acceptDownloads: true,
-    args: [
-      ...runtime.launchArgs,
-      "--disable-blink-features=AutomationControlled",
-      "--disable-features=IsolateOrigins,site-per-process",
-      "--no-first-run",
-      "--no-default-browser-check"
-    ],
-    channel: runtime.channel,
-    downloadsPath: downloadTempDir,
-    headless: runtime.headless,
-    slowMo: runtime.slowMoMs,
-    viewport: { width: 1440, height: 960 }
+  const authenticatedDirectFetch = {
+    enabled: Boolean(config.download?.authenticatedDirectFetch),
+    requestDelayMs: config.download?.directRequestDelayMs || 0
   };
-  if (runtime.executablePath) {
-    launchOptions.executablePath = runtime.executablePath;
-  }
 
-  let context;
-  try {
-    context = await chromium.launchPersistentContext(runtime.userDataDir, launchOptions);
-  } catch (error) {
-    throw new Error(
-      `Failed to launch ${runtime.channel} with user data dir ${runtime.userDataDir}. Close all browser windows first. ${error.message}`
-    );
-  }
-
-  // 反检测：移除自动化浏览器指纹
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
-    window.chrome = { runtime: {} };
-    const originalQuery = window.navigator.permissions?.query;
-    if (originalQuery) {
-      window.navigator.permissions.query = (parameters) =>
-        parameters.name === "notifications"
-          ? Promise.resolve({ state: Notification.permission })
-          : originalQuery(parameters);
+  let context = null;
+  let browserLaunchPromise = null;
+  const ensureBrowserContext = async () => {
+    if (context) {
+      return context;
     }
-  });
+    if (!browserLaunchPromise) {
+      browserLaunchPromise = (async () => {
+        let playwrightModule;
+        try {
+          playwrightModule = await import("playwright");
+        } catch (error) {
+          throw new Error(`Playwright is not installed. Run "npm install" inside ${projectDir}: ${error.message}`);
+        }
+
+        const { chromium } = playwrightModule;
+        const runtime = resolveBrowserRuntime(config.browser);
+        const launchOptions = {
+          acceptDownloads: true,
+          args: [
+            ...runtime.launchArgs,
+            "--no-first-run",
+            "--no-default-browser-check"
+          ],
+          channel: runtime.channel,
+          downloadsPath: downloadTempDir,
+          headless: runtime.headless,
+          slowMo: runtime.slowMoMs,
+          viewport: { width: 1440, height: 960 }
+        };
+        if (runtime.executablePath) {
+          launchOptions.executablePath = runtime.executablePath;
+        }
+
+        try {
+          return await chromium.launchPersistentContext(runtime.userDataDir, launchOptions);
+        } catch (error) {
+          throw new Error(
+            `Failed to launch ${runtime.channel} with user data dir ${runtime.userDataDir}. Close all browser windows first. ${error.message}`
+          );
+        }
+      })();
+    }
+    context = await browserLaunchPromise;
+    return context;
+  };
 
   try {
     const total = validatedData.references.length;
     const usedFileNames = new Set();
     for (const [offset, ref] of validatedData.references.entries()) {
       printProgress(offset + 1, total, ref);
+      let plannedFileName = "";
       try {
         const fileChoice = await chooseOutputFilename(projectDir, ref, usedFileNames);
         const fileName = fileChoice.fileName;
+        plannedFileName = fileName;
         const destPath = path.join(projectDir, fileName);
         const isChineseRoute = ref.route_family === "chinese_platform";
 
         if (!isChineseRoute && ref.status === "no_doi") {
-          rows.push(buildReportRow(ref, { pdf_status: "no_doi", notes: ref.error || "" }));
+          rows.push(buildReportRow(ref, { target_pdf_file: fileName, pdf_status: "no_doi", notes: ref.error || "" }));
           continue;
         }
         if (ref.status === "ignored") {
-          rows.push(buildReportRow(ref, { pdf_status: "ignored", notes: ref.error || "" }));
+          rows.push(buildReportRow(ref, { target_pdf_file: fileName, pdf_status: "ignored", notes: ref.error || "" }));
           continue;
         }
         if (fileChoice.alreadyExists) {
           const existingStats = await fs.stat(destPath);
           rows.push(buildReportRow(ref, {
             pdf_file: fileName,
+            target_pdf_file: fileName,
             pdf_status: "already_exists",
             pdf_size_kb: kbFromBytes(existingStats.size),
             notes: "Skipped because the PDF already exists"
@@ -1425,19 +1789,37 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
           sourcePlatform: ref.source_platform || "",
           articleUrl: ref.article_url || ref.link || "",
           matchConfidence: "",
-          downloadFormat: ""
+          downloadFormat: "",
+          oaSource: ""
         };
 
         if (isChineseRoute) {
-          finalResult = await attemptChinesePlatformDownload({
-            context,
-            ref,
-            destPath,
-            institution: config.institution,
-            auto,
-            logger
-          });
+          if (!config.download?.browserFallback) {
+            finalResult = {
+              ...finalResult,
+              reason: "browser_fallback_disabled_for_chinese_platform"
+            };
+          } else {
+            finalResult = await attemptChinesePlatformDownload({
+              context: await ensureBrowserContext(),
+              ref,
+              destPath,
+              institution: config.institution,
+              auto,
+              logger,
+              authenticatedDirectFetch
+            });
+          }
         } else {
+          if (config.openAccess?.enabled) {
+            finalResult = await attemptOpenAccessDownload({
+              ref,
+              destPath,
+              config,
+              logger
+            });
+          }
+
           const attemptUrls = uniquePreserveOrder([
             buildDirectPdfUrl(ref.doi, ref.publisher),
             buildArticleUrl(ref.doi, ref.publisher),
@@ -1445,7 +1827,7 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
             ...derivePdfUrlsFromArticleUrl(ref.article_url || ref.link || "", ref, ref.publisher || "unknown")
           ]).filter(Boolean);
 
-          if (attemptUrls.length === 0) {
+          if (attemptUrls.length === 0 && finalResult.state !== "downloaded") {
             finalResult = {
               state: "failed_auto",
               reason: "no_download_route_available",
@@ -1453,35 +1835,46 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
               sourcePlatform: "",
               articleUrl: ref.article_url || ref.link || "",
               matchConfidence: "",
-              downloadFormat: ""
+              downloadFormat: "",
+              oaSource: finalResult.oaSource || ""
             };
           }
 
-          for (const candidateUrl of attemptUrls) {
-            const fetched = await tryDirectPdfFetch({
-              ref,
-              url: candidateUrl,
-              destPath,
-              logger
-            });
-            if (fetched) {
-              finalResult = {
-                ...fetched,
-                sourcePlatform: ref.source_platform || "",
-                articleUrl: ref.article_url || ref.link || candidateUrl,
-                matchConfidence: "",
-                downloadFormat: "pdf"
-              };
-              break;
+          if (finalResult.state !== "downloaded" && config.download?.publisherDirectFetch) {
+            for (const [index, candidateUrl] of attemptUrls.entries()) {
+              if (index > 0 && config.download?.directRequestDelayMs) {
+                await sleep(config.download.directRequestDelayMs);
+              }
+              const fetched = await tryDirectPdfFetch({
+                ref,
+                url: candidateUrl,
+                destPath,
+                logger
+              });
+              if (fetched) {
+                finalResult = {
+                  ...fetched,
+                  sourcePlatform: ref.source_platform || "",
+                  articleUrl: ref.article_url || ref.link || candidateUrl,
+                  matchConfidence: "",
+                  downloadFormat: "pdf",
+                  oaSource: finalResult.oaSource || ""
+                };
+                break;
+              }
             }
           }
 
-          if (finalResult.state !== "downloaded") {
-            for (const attemptUrl of attemptUrls) {
-              const page = await context.newPage();
+          if (finalResult.state !== "downloaded" && config.download?.browserFallback) {
+            const browserContext = await ensureBrowserContext();
+            for (const [index, attemptUrl] of attemptUrls.entries()) {
+              if (index > 0 && config.download?.browserAttemptDelayMs) {
+                await sleep(config.download.browserAttemptDelayMs);
+              }
+              const page = await browserContext.newPage();
               try {
                 const result = await attemptCaptureFromPage({
-                  context,
+                  context: browserContext,
                   page,
                   ref,
                   publisher: ref.publisher || "unknown",
@@ -1491,14 +1884,16 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
                   logger,
                   visited: new Set(),
                   depth: 0,
-                  url: attemptUrl
+                  url: attemptUrl,
+                  authenticatedDirectFetch
                 });
                 finalResult = {
                   ...result,
                   sourcePlatform: ref.source_platform || "",
                   articleUrl: ref.article_url || ref.link || attemptUrl,
                   matchConfidence: "",
-                  downloadFormat: result.state === "downloaded" ? "pdf" : ""
+                  downloadFormat: result.state === "downloaded" ? "pdf" : "",
+                  oaSource: finalResult.oaSource || ""
                 };
                 if (result.state !== "failed_auto") {
                   break;
@@ -1513,9 +1908,11 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
         if (finalResult.state === "downloaded") {
           rows.push(buildReportRow(ref, {
             pdf_file: fileName,
+            target_pdf_file: fileName,
             pdf_status: "downloaded",
             download_format: finalResult.downloadFormat || "pdf",
             pdf_size_kb: finalResult.sizeKb || "",
+            oa_source: finalResult.oaSource || "",
             source_platform: finalResult.sourcePlatform || ref.source_platform || "",
             article_url: finalResult.articleUrl || ref.article_url || ref.link || "",
             source_url: finalResult.sourceUrl || "",
@@ -1524,8 +1921,10 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
           }));
         } else if (finalResult.state === "manual_pending") {
           rows.push(buildReportRow(ref, {
+            target_pdf_file: fileName,
             pdf_status: "manual_pending",
             download_format: finalResult.downloadFormat || "",
+            oa_source: finalResult.oaSource || "",
             source_platform: finalResult.sourcePlatform || ref.source_platform || "",
             article_url: finalResult.articleUrl || ref.article_url || ref.link || "",
             source_url: finalResult.sourceUrl || "",
@@ -1534,8 +1933,10 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
           }));
         } else {
           rows.push(buildReportRow(ref, {
+            target_pdf_file: fileName,
             pdf_status: "failed_auto",
             download_format: finalResult.downloadFormat || "",
+            oa_source: finalResult.oaSource || "",
             source_platform: finalResult.sourcePlatform || ref.source_platform || "",
             article_url: finalResult.articleUrl || ref.article_url || ref.link || "",
             source_url: finalResult.sourceUrl || "",
@@ -1545,19 +1946,41 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
         }
       } catch (error) {
         rows.push(buildReportRow(ref, {
+          target_pdf_file: plannedFileName,
           pdf_status: "failed_exception",
           notes: String(error?.message || error)
         }));
       } finally {
         await writeCsv(path.join(projectDir, "download_report.csv"), rows);
-        await sleep(500);
+        await sleep(config.download?.itemDelayMs ?? 750);
       }
     }
   } finally {
-    await context.close();
+    if (context) {
+      await context.close();
+    }
   }
 
   const summary = summarizeDownloadRows(rows);
+  const manualQueue = config.download?.manualInterventionQueue
+    ? buildManualInterventionQueue(rows)
+    : [];
+  const manualQueuePath = path.join(projectDir, "manual_intervention_queue.json");
+  const manualMarkdownPath = path.join(projectDir, "manual_intervention.md");
+  if (config.download?.manualInterventionQueue) {
+    const generatedAt = nowIso();
+    await writeJson(manualQueuePath, {
+      generated_at: generatedAt,
+      total: manualQueue.length,
+      items: manualQueue
+    });
+    await fs.writeFile(manualMarkdownPath, renderManualInterventionMarkdown(manualQueue, generatedAt), "utf8");
+    summary.manual_intervention = {
+      total: manualQueue.length,
+      queue_path: manualQueuePath,
+      markdown_path: manualMarkdownPath
+    };
+  }
   const summaryPath = path.join(projectDir, "download_summary.json");
   await writeJson(summaryPath, summary);
 
@@ -1565,6 +1988,9 @@ export async function downloadValidatedReferences({ projectDir, validatedData, c
     rows,
     runDir: logger.runDir,
     summary,
-    summaryPath
+    summaryPath,
+    manualQueue,
+    manualQueuePath: config.download?.manualInterventionQueue ? manualQueuePath : "",
+    manualMarkdownPath: config.download?.manualInterventionQueue ? manualMarkdownPath : ""
   };
 }
